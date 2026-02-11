@@ -41,17 +41,21 @@ jobs:
             exit 1
           fi
 
-          # 設定ファイルを生成 (相対パスを使用)
-          # 注意: local_rootは実行ディレクトリ(リポジトリルート)から見たパス
+          # 設定ファイルを生成 (絶対パスを使用)
+          # 注意: GitHub Actions上では絶対パスの方が安全な場合がある
+          ABS_ROOT="$(pwd)/articles"
+          
           cat <<CONFIG > blogsync.yaml
           $CLEAN_BLOG_ID:
             username: $USER_ID
             password: $API_KEY
             default:
-              local_root: articles
+              local_root: $ABS_ROOT
           CONFIG
           
           echo "Generated Config for: $CLEAN_BLOG_ID"
+          echo "Local root set to: $ABS_ROOT"
+          
           echo "--- blogsync.yaml content (masked) ---"
           sed 's/password: .*/password: ***/g' blogsync.yaml | sed 's/username: .*/username: ***/g'
           echo "--------------------------------------"
@@ -68,32 +72,37 @@ jobs:
           fi
           
           echo "Changed files: $FILES"
+          
+          # 絶対パスのルートを取得
+          ABS_ROOT="$(pwd)"
 
           for FILE in $FILES; do
              # ファイルが存在しない場合はスキップ (削除された場合など)
              if [ ! -f "$FILE" ]; then
                continue
              fi
+             
+             # 絶対パスに変換
+             ABS_FILE="$ABS_ROOT/$FILE"
 
              # EditURLがない(=新規記事)の場合、Draft: true を強制する
-             if ! grep -q "EditURL:" "$FILE"; then
+             if ! grep -q "EditURL:" "$ABS_FILE"; then
                echo "New article detected: $FILE"
-               if grep -q "Draft: false" "$FILE"; then
+               if grep -q "Draft: false" "$ABS_FILE"; then
                  echo "  Enforcing Draft: true for safety."
-                 sed -i 's/Draft: false/Draft: true/' "$FILE"
-               elif ! grep -q "Draft:" "$FILE"; then
+                 sed -i 's/Draft: false/Draft: true/' "$ABS_FILE"
+               elif ! grep -q "Draft:" "$ABS_FILE"; then
                  echo "  Adding Draft: true."
                  # 最初の --- の後に挿入
-                 sed -i '0,/^---$/s//---\nDraft: true/' "$FILE"
-                 # もしフロントマターがない場合などは別途考慮が必要だが、基本はある前提
+                 sed -i '0,/^---$/s//---\nDraft: true/' "$ABS_FILE"
                fi
              else
                echo "Existing article update: $FILE"
              fi
              
-             # 個別にPush
-             echo "Pushing $FILE..."
-             blogsync push "$FILE"
+             # 個別にPush (絶対パスを使用)
+             echo "Pushing $ABS_FILE..."
+             blogsync push "$ABS_FILE"
           done
 
           # 変更をコミットバック
