@@ -33,52 +33,157 @@ jobs:
           USER_ID: ${{ secrets.HATENA_USER_ID }}
           API_KEY: ${{ secrets.HATENA_API_KEY }}
         run: |
-          if [ -z "$BLOG_ID" ]; then
-            echo "Error: HATENA_BLOG_ID is not set."
+          # BLOG_IDのサニタイズ (URLスキーム除去、末尾スラッシュ除去、空白除去)
+          CLEAN_BLOG_ID=$(echo "${BLOG_ID}" | sed -e 's|^https://||' -e 's|^http://||' -e 's|/$||' | tr -d '[:space:]')
+
+          if [ -z "$CLEAN_BLOG_ID" ]; then
+            echo "Error: HATENA_BLOG_ID is not set or invalid."
             exit 1
           fi
 
-          # ヒアドキュメントで設定ファイルを生成
-          cat <<CONFIG > blogsync.yaml
-          $BLOG_ID:
-            username: $USER_ID
-            password: $API_KEY
-            default:
-              local_root: articles
-          CONFIG
-          
-          echo "Generated Config for: $BLOG_ID"
+          # blogsync設定ファイルを生成 (echoで1行ずつ書く = インデントずれ防止)
+          # omit_domain: true にすると local_root 直下にエントリが格納される
+          # (blogID サブフォルダが不要になる)
+          echo "${CLEAN_BLOG_ID}:" > blogsync.yaml
+          echo "  username: ${USER_ID}" >> blogsync.yaml
+          echo "  password: ${API_KEY}" >> blogsync.yaml
+          echo "  omit_domain: true" >> blogsync.yaml
+          echo "  local_root: articles" >> blogsync.yaml
+
+          echo "Generated blogsync.yaml for: $CLEAN_BLOG_ID"
+          echo "--- blogsync.yaml (masked) ---"
+          sed -e 's/password: .*/password: ***/' -e 's/username: .*/username: ***/' blogsync.yaml
+          echo "------------------------------"
+
+          # BLOG_IDを後続ステップで使えるように保存
+          echo "CLEAN_BLOG_ID=${CLEAN_BLOG_ID}" >> $GITHUB_ENV
 
       - name: Sync and Commit Back
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          # 変更されたMarkdownファイルを取得
           FILES=$(git diff --name-only HEAD^ HEAD | grep '^articles/.*\.md$' || true)
           if [ -z "$FILES" ]; then
             echo "No markdown files changed."
             exit 0
           fi
 
-          blogsync push $FILES
+          echo "Changed files:"
+          echo "$FILES"
 
+          # 結果を記録するファイル (PRコメント用)
+          RESULT_FILE=$(mktemp)
+          echo "" > "$RESULT_FILE"
+
+          for FILE in $FILES; do
+            # ファイルが存在しない場合はスキップ (削除されたファイル)
+            if [ ! -f "$FILE" ]; then
+              echo "[SKIP] $FILE (deleted)"
+              continue
+            fi
+
+            # フロントマターからタイトルを抽出
+            TITLE=$(sed -n 's/^[Tt]itle: *"\{0,1\}\(.*\)"\{0,1\}$/\1/p' "$FILE" | head -1)
+            if [ -z "$TITLE" ]; then
+              TITLE="(無題)"
+            fi
+            echo "Title: $TITLE"
+
+            # EditURL の有無で新規 or 既存を判定
+            if grep -q "EditURL:" "$FILE"; then
+              # ======== 既存記事の更新 (blogsync push) ========
+              echo "[UPDATE] $FILE (title: $TITLE)"
+              OUTPUT=$(blogsync push "$FILE" 2>&1) || true
+              echo "$OUTPUT"
+
+              # 記事URLをフロントマターから取得
+              ARTICLE_URL=$(sed -n 's/^URL: *\(.*\)$/\1/p' "$FILE" | head -1)
+              echo "UPDATE|${TITLE}|${ARTICLE_URL}" >> "$RESULT_FILE"
+            else
+              # ======== 新規記事の投稿 (blogsync post --draft --title) ========
+              echo "[NEW] $FILE -> posting as draft to ${CLEAN_BLOG_ID} (title: $TITLE)"
+
+              # blogsync post は標準入力から内容を受け取る
+              # --title でタイトルを指定、--draft で下書き投稿
+              OUTPUT=$(blogsync post --draft --title="$TITLE" "${CLEAN_BLOG_ID}" < "$FILE" 2>&1) || true
+              echo "$OUTPUT"
+
+              # blogsync post の出力からファイルパスを取得し、そこからURLを読み取る
+              CREATED_PATH=$(echo "$OUTPUT" | grep "^store" | awk '{print $2}')
+              if [ -n "$CREATED_PATH" ] && [ -f "$CREATED_PATH" ]; then
+                ARTICLE_URL=$(sed -n 's/^URL: *\(.*\)$/\1/p' "$CREATED_PATH" | head -1)
+                EDIT_URL=$(sed -n 's/^EditURL: *\(.*\)$/\1/p' "$CREATED_PATH" | head -1)
+              else
+                ARTICLE_URL=""
+                EDIT_URL=""
+              fi
+              echo "NEW|${TITLE}|${ARTICLE_URL}|${EDIT_URL}" >> "$RESULT_FILE"
+            fi
+          done
+
+          # 結果ファイルを後続ステップで使えるように保存
+          cp "$RESULT_FILE" /tmp/sync_results.txt
+          cat /tmp/sync_results.txt
+
+          # 変更をコミットバック (blogsyncが追記するEditURL等)
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          
+
           if git diff --quiet; then
             echo "No changes to commit back."
           else
-            git add $FILES
+            git add articles/
             git commit -m "chore: update blog metadata [skip ci]"
             git push origin HEAD:${{ github.ref }}
           fi
 
-      - name: Comment Preview URL
+      - name: Comment PR with Results
         if: github.event_name == 'pull_request'
         uses: actions/github-script@v7
         with:
           script: |
-            const blogId = '${{ vars.HATENA_BLOG_ID }}';
-            const body = `### 📝 ブログ同期完了\n\n確認はこちら: https://${blogId}/`;
+            const fs = require('fs');
+            const blogId = '${{ secrets.HATENA_BLOG_ID }}';
+
+            let lines = [];
+            try {
+              const data = fs.readFileSync('/tmp/sync_results.txt', 'utf8');
+              lines = data.split('\n').filter(l => l.trim().length > 0);
+            } catch (e) {
+              lines = [];
+            }
+
+            let body = '### 📝 ブログ同期結果\n\n';
+
+            if (lines.length === 0) {
+              body += '変更された記事はありませんでした。\n';
+            } else {
+              body += '| 状態 | タイトル | リンク |\n';
+              body += '|------|---------|--------|\n';
+
+              for (const line of lines) {
+                const parts = line.split('|');
+                const type = parts[0];
+                const title = parts[1] || '(無題)';
+
+                if (type === 'NEW') {
+                  const url = parts[2] || '';
+                  const editUrl = parts[3] || '';
+                  const draftLink = url
+                    ? `[プレビュー](${url})`
+                    : (editUrl ? `[編集](${editUrl})` : 'URLなし');
+                  body += `| 🆕 下書き | ${title} | ${draftLink} |\n`;
+                } else if (type === 'UPDATE') {
+                  const url = parts[2] || '';
+                  const link = url ? `[記事を見る](${url})` : 'URLなし';
+                  body += `| ✏️ 更新 | ${title} | ${link} |\n`;
+                }
+              }
+
+              body += `\n\n🔗 ブログ: https://${blogId}/`;
+            }
+
             github.rest.issues.createComment({
               issue_number: context.issue.number,
               owner: context.repo.owner,
