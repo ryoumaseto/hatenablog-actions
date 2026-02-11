@@ -29,8 +29,8 @@ jobs:
 
       - name: Create Config
         env:
-          BLOG_ID: ${{ vars.HATENA_BLOG_ID }}
-          USER_ID: ${{ vars.HATENA_USER_ID }}
+          BLOG_ID: ${{ secrets.HATENA_BLOG_ID }}
+          USER_ID: ${{ secrets.HATENA_USER_ID }}
           API_KEY: ${{ secrets.HATENA_API_KEY }}
         run: |
           if [ -z "$BLOG_ID" ]; then
