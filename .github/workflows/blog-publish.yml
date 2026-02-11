@@ -33,19 +33,31 @@ jobs:
           USER_ID: ${{ secrets.HATENA_USER_ID }}
           API_KEY: ${{ secrets.HATENA_API_KEY }}
         run: |
+          # 環境変数の余分な空白や改行を除去
+          BLOG_ID=$(echo "${BLOG_ID}" | tr -d '[:space:]')
+
           if [ -z "$BLOG_ID" ]; then
             echo "Error: HATENA_BLOG_ID is not set."
             exit 1
           fi
 
-          # 確実にパースされる書き方に修正 (echoを使用)
+          # 記事ディレクトリの絶対パスを取得
+          ABS_ROOT="$(pwd)/articles"
+
+          # 設定ファイルを生成 (絶対パスを使用)
           echo "$BLOG_ID:" > blogsync.yaml
           echo "  username: $USER_ID" >> blogsync.yaml
           echo "  password: $API_KEY" >> blogsync.yaml
           echo "  default:" >> blogsync.yaml
-          echo "    local_root: articles" >> blogsync.yaml
+          echo "    local_root: $ABS_ROOT" >> blogsync.yaml
           
           echo "Generated Config for: $BLOG_ID"
+          echo "Local root set to: $ABS_ROOT"
+
+          # デバッグ用: 生成された設定を表示 (パスワード等は伏せる)
+          echo "--- blogsync.yaml content (masked) ---"
+          sed 's/password: .*/password: ***/g' blogsync.yaml | sed 's/username: .*/username: ***/g'
+          echo "--------------------------------------"
 
       - name: Sync and Commit Back
         env:
