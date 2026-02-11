@@ -41,72 +41,66 @@ jobs:
             exit 1
           fi
 
-          # 設定ファイルを生成 (local_rootをカレント . に設定)
-          # 注意: これから articles ディレクトリに移動してコマンドを実行するため、
-          # そのディレクトリ内でのルート(=自分自身)を指すようにします。
-          cat <<CONFIG > blogsync.yaml
-          $CLEAN_BLOG_ID:
-            username: $USER_ID
-            password: $API_KEY
-            default:
-              local_root: .
-          CONFIG
-          
-          # blogsync.yaml を articles ディレクトリにもコピー (念のため)
-          cp blogsync.yaml articles/blogsync.yaml
-          
-          echo "Generated Config for: $CLEAN_BLOG_ID"
+          # blogsync設定ファイルを生成 (echoで1行ずつ書く = インデントずれ防止)
+          # omit_domain: true にすると local_root 直下にエントリが格納される
+          # (blogID サブフォルダが不要になる)
+          echo "${CLEAN_BLOG_ID}:" > blogsync.yaml
+          echo "  username: ${USER_ID}" >> blogsync.yaml
+          echo "  password: ${API_KEY}" >> blogsync.yaml
+          echo "  omit_domain: true" >> blogsync.yaml
+          echo "  local_root: articles" >> blogsync.yaml
+
+          echo "Generated blogsync.yaml for: $CLEAN_BLOG_ID"
+          echo "--- blogsync.yaml (masked) ---"
+          sed -e 's/password: .*/password: ***/' -e 's/username: .*/username: ***/' blogsync.yaml
+          echo "------------------------------"
+
+          # BLOG_IDを後続ステップで使えるように保存
+          echo "CLEAN_BLOG_ID=${CLEAN_BLOG_ID}" >> $GITHUB_ENV
 
       - name: Sync and Commit Back
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           # 変更されたMarkdownファイルを取得
-          # 注意: articles/sample.md のようなパスが返ってくる
           FILES=$(git diff --name-only HEAD^ HEAD | grep '^articles/.*\.md$' || true)
           if [ -z "$FILES" ]; then
             echo "No markdown files changed."
             exit 0
           fi
-          
-          echo "Changed files: $FILES"
+
+          echo "Changed files:"
+          echo "$FILES"
 
           for FILE in $FILES; do
-             # ファイルが存在しない場合はスキップ
-             if [ ! -f "$FILE" ]; then
-               continue
-             fi
+            # ファイルが存在しない場合はスキップ (削除されたファイル)
+            if [ ! -f "$FILE" ]; then
+              echo "[SKIP] $FILE (deleted)"
+              continue
+            fi
 
-             # 1. 新規記事 (EditURLがない) -> Draft: yes (true) を強制
-             if ! grep -q "EditURL:" "$FILE"; then
-               echo "[NEW] Processing new article: $FILE"
-               if grep -q "Draft: false" "$FILE"; then
-                 sed -i 's/Draft: false/Draft: true/' "$FILE"
-               elif ! grep -qE "Draft: (true|yes)" "$FILE"; then
-                 # フロントマター末尾に追加 (簡易)
-                 sed -i '/^---$/a Draft: true' "$FILE" 
-               fi
-             else
-               echo "[UPDATE] Updating existing article: $FILE"
-             fi
-             
-             # ファイル名のみ抽出 (例: articles/sample.md -> sample.md)
-             FILENAME=$(basename "$FILE")
-             
-             # articles ディレクトリに移動して実行
-             # これにより "local_root: ." (カレント) と "sample.md" (カレント内のファイル) が一致する
-             echo "Pushing $FILENAME inside articles/ ..."
-             (cd articles && blogsync push "$FILENAME")
+            # EditURL の有無で新規 or 既存を判定
+            if grep -q "EditURL:" "$FILE"; then
+              # ======== 既存記事の更新 (blogsync push) ========
+              echo "[UPDATE] $FILE"
+              blogsync push "$FILE"
+            else
+              # ======== 新規記事の投稿 (blogsync post --draft) ========
+              echo "[NEW] $FILE -> posting as draft to ${CLEAN_BLOG_ID}"
+              # blogsync post は標準入力から内容を受け取り、下書きとして投稿する
+              # 投稿後、blogsyncが local_root 配下に正式なファイルを生成する
+              blogsync post --draft "${CLEAN_BLOG_ID}" < "$FILE"
+            fi
           done
 
-          # 変更をコミットバック (Draftなどの自動修正分、およびblogsyncが追記するEditURL)
+          # 変更をコミットバック (blogsyncが追記するEditURL等)
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          
+
           if git diff --quiet; then
             echo "No changes to commit back."
           else
-            git add articles/*.md
+            git add articles/
             git commit -m "chore: update blog metadata [skip ci]"
             git push origin HEAD:${{ github.ref }}
           fi
