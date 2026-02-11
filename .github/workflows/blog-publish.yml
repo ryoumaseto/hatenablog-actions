@@ -1,0 +1,87 @@
+name: Hatena Blog Sync
+
+on:
+  push:
+    branches:
+      - main
+      - 'feature/**'
+  pull_request:
+    types: [opened, synchronize]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    if: "!contains(github.event.head_commit.message, '[skip ci]')"
+    
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup blogsync
+        run: |
+          go install github.com/x-motemen/blogsync@latest
+          echo "$(go env GOPATH)/bin" >> $GITHUB_PATH
+
+      - name: Create Config
+        env:
+          BLOG_ID: ${{ vars.HATENA_BLOG_ID }}
+          USER_ID: ${{ vars.HATENA_USER_ID }}
+          API_KEY: ${{ secrets.HATENA_API_KEY }}
+        run: |
+          if [ -z "$BLOG_ID" ]; then
+            echo "Error: HATENA_BLOG_ID is not set."
+            exit 1
+          fi
+
+          # ヒアドキュメントで設定ファイルを生成
+          cat <<CONFIG > blogsync.yaml
+          $BLOG_ID:
+            username: $USER_ID
+            password: $API_KEY
+            default:
+              local_root: articles
+          CONFIG
+          
+          echo "Generated Config for: $BLOG_ID"
+
+      - name: Sync and Commit Back
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          FILES=$(git diff --name-only HEAD^ HEAD | grep '^articles/.*\.md$' || true)
+          if [ -z "$FILES" ]; then
+            echo "No markdown files changed."
+            exit 0
+          fi
+
+          blogsync push $FILES
+
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          
+          if git diff --quiet; then
+            echo "No changes to commit back."
+          else
+            git add $FILES
+            git commit -m "chore: update blog metadata [skip ci]"
+            git push origin HEAD:${{ github.ref }}
+          fi
+
+      - name: Comment Preview URL
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const blogId = '${{ vars.HATENA_BLOG_ID }}';
+            const body = `### 📝 ブログ同期完了\n\n確認はこちら: https://${blogId}/`;
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: body
+            });
