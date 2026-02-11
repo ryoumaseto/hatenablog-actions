@@ -41,7 +41,9 @@ jobs:
             exit 1
           fi
 
-          # 設定ファイルを生成 (local_rootをカレントディレクトリ . に設定してマッチングを確実にする)
+          # 設定ファイルを生成 (local_rootをカレント . に設定)
+          # 注意: これから articles ディレクトリに移動してコマンドを実行するため、
+          # そのディレクトリ内でのルート(=自分自身)を指すようにします。
           cat <<CONFIG > blogsync.yaml
           $CLEAN_BLOG_ID:
             username: $USER_ID
@@ -50,18 +52,17 @@ jobs:
               local_root: .
           CONFIG
           
-          echo "Generated Config for: $CLEAN_BLOG_ID (local_root: .)"
+          # blogsync.yaml を articles ディレクトリにもコピー (念のため)
+          cp blogsync.yaml articles/blogsync.yaml
           
-          # デバッグ用
-          echo "--- blogsync.yaml content (masked) ---"
-          sed 's/password: .*/password: ***/g' blogsync.yaml | sed 's/username: .*/username: ***/g'
-          echo "--------------------------------------"
+          echo "Generated Config for: $CLEAN_BLOG_ID"
 
       - name: Sync and Commit Back
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          # 変更されたMarkdownファイルを取得 (相対パス)
+          # 変更されたMarkdownファイルを取得
+          # 注意: articles/sample.md のようなパスが返ってくる
           FILES=$(git diff --name-only HEAD^ HEAD | grep '^articles/.*\.md$' || true)
           if [ -z "$FILES" ]; then
             echo "No markdown files changed."
@@ -77,29 +78,25 @@ jobs:
              fi
 
              # 1. 新規記事 (EditURLがない) -> Draft: yes (true) を強制
-             # 2. 既存記事 (EditURLがある) -> そのまま更新
-             
              if ! grep -q "EditURL:" "$FILE"; then
                echo "[NEW] Processing new article: $FILE"
-               
-               # Draftステータスのチェックと強制書き換え
                if grep -q "Draft: false" "$FILE"; then
-                 echo "  -> Forcing Draft: true"
                  sed -i 's/Draft: false/Draft: true/' "$FILE"
                elif ! grep -qE "Draft: (true|yes)" "$FILE"; then
-                 echo "  -> Adding Draft: true"
-                 # フロントマターの最後に挿入（簡易的）
+                 # フロントマター末尾に追加 (簡易)
                  sed -i '/^---$/a Draft: true' "$FILE" 
-                 # 注意: 2個目の---の後に付く可能性もあるが、通常は最初の---の後、あるいは各行チェックが必要
-                 # より安全に: 最初の行が --- であれば、その直後(2行目)に挿入など
                fi
              else
                echo "[UPDATE] Updating existing article: $FILE"
              fi
              
-             # Push実行 (相対パス)
-             echo "Exec: blogsync push $FILE"
-             blogsync push "$FILE"
+             # ファイル名のみ抽出 (例: articles/sample.md -> sample.md)
+             FILENAME=$(basename "$FILE")
+             
+             # articles ディレクトリに移動して実行
+             # これにより "local_root: ." (カレント) と "sample.md" (カレント内のファイル) が一致する
+             echo "Pushing $FILENAME inside articles/ ..."
+             (cd articles && blogsync push "$FILENAME")
           done
 
           # 変更をコミットバック (Draftなどの自動修正分、およびblogsyncが追記するEditURL)
