@@ -33,28 +33,25 @@ jobs:
           USER_ID: ${{ secrets.HATENA_USER_ID }}
           API_KEY: ${{ secrets.HATENA_API_KEY }}
         run: |
-          # 環境変数の余分な空白や改行を除去
-          BLOG_ID=$(echo "${BLOG_ID}" | tr -d '[:space:]')
+          # BLOG_IDのサニタイズ (URLスキーム除去、末尾スラッシュ除去、空白除去)
+          CLEAN_BLOG_ID=$(echo "${BLOG_ID}" | sed -e 's|^https://||' -e 's|^http://||' -e 's|/$||' | tr -d '[:space:]')
 
-          if [ -z "$BLOG_ID" ]; then
-            echo "Error: HATENA_BLOG_ID is not set."
+          if [ -z "$CLEAN_BLOG_ID" ]; then
+            echo "Error: HATENA_BLOG_ID is not set or invalid."
             exit 1
           fi
 
-          # 記事ディレクトリの絶対パスを取得
-          ABS_ROOT="$(pwd)/articles"
-
-          # 設定ファイルを生成 (絶対パスを使用)
-          echo "$BLOG_ID:" > blogsync.yaml
-          echo "  username: $USER_ID" >> blogsync.yaml
-          echo "  password: $API_KEY" >> blogsync.yaml
-          echo "  default:" >> blogsync.yaml
-          echo "    local_root: $ABS_ROOT" >> blogsync.yaml
+          # 設定ファイルを生成 (相対パスを使用)
+          # 注意: local_rootは実行ディレクトリ(リポジトリルート)から見たパス
+          cat <<CONFIG > blogsync.yaml
+          $CLEAN_BLOG_ID:
+            username: $USER_ID
+            password: $API_KEY
+            default:
+              local_root: articles
+          CONFIG
           
-          echo "Generated Config for: $BLOG_ID"
-          echo "Local root set to: $ABS_ROOT"
-
-          # デバッグ用: 生成された設定を表示 (パスワード等は伏せる)
+          echo "Generated Config for: $CLEAN_BLOG_ID"
           echo "--- blogsync.yaml content (masked) ---"
           sed 's/password: .*/password: ***/g' blogsync.yaml | sed 's/username: .*/username: ***/g'
           echo "--------------------------------------"
@@ -63,21 +60,50 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          # 変更されたMarkdownファイルを取得
           FILES=$(git diff --name-only HEAD^ HEAD | grep '^articles/.*\.md$' || true)
           if [ -z "$FILES" ]; then
             echo "No markdown files changed."
             exit 0
           fi
+          
+          echo "Changed files: $FILES"
 
-          blogsync push $FILES
+          for FILE in $FILES; do
+             # ファイルが存在しない場合はスキップ (削除された場合など)
+             if [ ! -f "$FILE" ]; then
+               continue
+             fi
 
+             # EditURLがない(=新規記事)の場合、Draft: true を強制する
+             if ! grep -q "EditURL:" "$FILE"; then
+               echo "New article detected: $FILE"
+               if grep -q "Draft: false" "$FILE"; then
+                 echo "  Enforcing Draft: true for safety."
+                 sed -i 's/Draft: false/Draft: true/' "$FILE"
+               elif ! grep -q "Draft:" "$FILE"; then
+                 echo "  Adding Draft: true."
+                 # 最初の --- の後に挿入
+                 sed -i '0,/^---$/s//---\nDraft: true/' "$FILE"
+                 # もしフロントマターがない場合などは別途考慮が必要だが、基本はある前提
+               fi
+             else
+               echo "Existing article update: $FILE"
+             fi
+             
+             # 個別にPush
+             echo "Pushing $FILE..."
+             blogsync push "$FILE"
+          done
+
+          # 変更をコミットバック
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           
           if git diff --quiet; then
             echo "No changes to commit back."
           else
-            git add $FILES
+            git add articles/*.md
             git commit -m "chore: update blog metadata [skip ci]"
             git push origin HEAD:${{ github.ref }}
           fi
